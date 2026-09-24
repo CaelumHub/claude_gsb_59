@@ -237,6 +237,212 @@ def withdraw():
 ''',
     },
     {
+        "name": "staking_rewards",
+        "title": "锁仓奖励（多笔独立质押）",
+        "category": "金融",
+        "description": (
+            "同一账户可同时发起多笔质押，每笔独立指定数量与锁定区块数，"
+            "独立按区块累积奖励、独立到期。到期可取回本金加奖励；提前取出"
+            "仅返还本金，该笔奖励作废，且不影响其他质押。"
+        ),
+        "constructor": [
+            {"name": "reward_per_block", "type": "float",
+             "desc": "每区块奖励率（按本金比例，如 0.01 表示每区块为本金的 1%）"},
+            {"name": "min_lock_blocks", "type": "int", "desc": "最短锁定区块数"},
+            {"name": "max_lock_blocks", "type": "int", "desc": "最长锁定区块数"},
+        ],
+        "functions": [
+            {"name": "stake", "desc": "发起一笔质押（需附带本金 value，参数为锁定区块数）",
+             "params": ["lock_blocks"]},
+            {"name": "unstake", "desc": "取回一笔质押：到期返还本金+奖励，提前仅返还本金",
+             "params": ["stake_id"]},
+            {"name": "fund_pool", "desc": "向奖励池注资（需附带 value），任何人可调用",
+             "params": []},
+            {"name": "reward_of", "desc": "查询某账户某笔质押当前已累积奖励",
+             "params": ["addr", "stake_id"]},
+            {"name": "remaining_blocks", "desc": "查询某笔质押距解锁还剩多少区块",
+             "params": ["addr", "stake_id"]},
+            {"name": "is_matured", "desc": "查询某笔质押是否已到期",
+             "params": ["addr", "stake_id"]},
+            {"name": "get_stake", "desc": "查询某笔质押的完整信息（本金/计息/解锁进度）",
+             "params": ["addr", "stake_id"]},
+            {"name": "stake_ids", "desc": "查询某账户持有的全部质押 ID",
+             "params": ["addr"]},
+            {"name": "pool_info", "desc": "查询奖励池余额、预留奖励、在押本金等全局信息",
+             "params": []},
+        ],
+        "source": '''# 锁仓奖励合约（多笔独立质押 / 独立计息 / 独立到期）
+#
+# 每笔质押独立指定数量与锁定区块数，拥有独立的 stake_id，
+# 按区块独立累积奖励、独立到期，账户内各笔互不影响。
+#   到期取出：本金 + 全部奖励
+#   提前取出：仅本金，该笔已累积奖励全部作废（退回奖励池）
+# 奖励来自奖励池，任何人可通过 fund_pool 注资。
+# 每区块奖励 = 本金 * reward_per_block，自质押所在区块起算，到期封顶。
+
+def init(reward_per_block, min_lock_blocks, max_lock_blocks):
+    require(state.get("rate") is None, "合约已初始化")
+    rate = float(reward_per_block)
+    lo = int(min_lock_blocks)
+    hi = int(max_lock_blocks)
+    require(rate > 0, "每区块奖励率必须为正")
+    require(lo >= 1, "最短锁定期至少为 1 个区块")
+    require(hi >= lo, "最长锁定期不能短于最短锁定期")
+    state["rate"] = rate
+    state["min_lock"] = lo
+    state["max_lock"] = hi
+    state["total_principal"] = 0.0   # 所有在押本金之和
+    state["reserved"] = 0.0         # 为所有在押质押预留的到期奖励之和
+    state["active"] = 0             # 当前有效质押笔数
+    state["next_id"] = 0            # 全局质押 ID 计数器
+    emit("PoolCreated", rate=rate, min_lock=lo, max_lock=hi, owner=msg.sender)
+
+def fund_pool():
+    require(msg.value > 0, "注资金额必须为正")
+    emit("PoolFunded", by=msg.sender, amount=msg.value,
+         available=_available() + msg.value)
+
+def stake(lock_blocks):
+    lock_blocks = int(lock_blocks)
+    amount = msg.value
+    require(amount > 0, "质押数量必须为正")
+    require(lock_blocks >= state["min_lock"], "低于最短锁定期")
+    require(lock_blocks <= state["max_lock"], "超过最长锁定期")
+    rate = float(state["rate"])
+    need = amount * rate * lock_blocks
+    # 奖励池必须能覆盖这笔质押到期时的全部奖励，到期兑付才不会失败。
+    require(_available() >= need, "奖励池余额不足，无法覆盖该笔质押的全部奖励")
+
+    sid = int(state["next_id"]) + 1
+    state["next_id"] = sid
+    start = block_height
+    unlock = start + lock_blocks
+    state["s_" + str(sid)] = [msg.sender, amount, start, lock_blocks, unlock]
+    ids = state.get("stakes_" + msg.sender, [])
+    ids.append(sid)
+    state["stakes_" + msg.sender] = ids
+    state["total_principal"] = float(state["total_principal"]) + amount
+    state["reserved"] = float(state["reserved"]) + need
+    state["active"] = int(state["active"]) + 1
+    emit("Staked", stake_id=sid, owner=msg.sender, amount=amount,
+         start=start, lock_blocks=lock_blocks, unlock=unlock,
+         reward_per_block=amount * rate)
+
+def unstake(stake_id):
+    sid_num = int(stake_id)
+    key = "s_" + str(sid_num)
+    s = state.get(key)
+    require(s is not None, "质押不存在")
+    require(s[0] == msg.sender, "只能取回自己的质押")
+
+    amount = float(s[1])
+    lock_blocks = int(s[3])
+    unlock = int(s[4])
+    rate = float(state["rate"])
+    elapsed = _elapsed(int(s[2]), lock_blocks)
+    matured = block_height >= unlock
+    reward = amount * rate * elapsed
+    payout = amount + reward if matured else amount
+
+    # 释放该笔在创建时预留的全部奖励：到期时正好等于应付奖励；
+    # 提前取出时预留奖励留回奖励池（该笔奖励作废，可供其他质押使用）。
+    state["reserved"] = float(state["reserved"]) - amount * rate * lock_blocks
+    state["total_principal"] = float(state["total_principal"]) - amount
+    state["active"] = int(state["active"]) - 1
+    ids = [i for i in state.get("stakes_" + msg.sender, []) if i != sid_num]
+    state["stakes_" + msg.sender] = ids
+    del state[key]
+
+    transfer(msg.sender, payout)
+    emit("Unstaked", stake_id=sid_num, owner=msg.sender, matured=matured,
+         principal=amount, reward_paid=reward if matured else 0.0,
+         reward_forfeited=0.0 if matured else reward)
+
+def reward_of(addr, stake_id):
+    return _earned(addr, stake_id)
+
+def earned(addr, stake_id):
+    return _earned(addr, stake_id)
+
+def remaining_blocks(addr, stake_id):
+    s = _must_get(addr, stake_id)
+    left = int(s[4]) - block_height
+    return left if left > 0 else 0
+
+def is_matured(addr, stake_id):
+    s = _must_get(addr, stake_id)
+    return block_height >= int(s[4])
+
+def get_stake(addr, stake_id):
+    sid_num = int(stake_id)
+    s = _must_get(addr, sid_num)
+    amount = float(s[1])
+    start = int(s[2])
+    lock_blocks = int(s[3])
+    unlock = int(s[4])
+    elapsed = _elapsed(start, lock_blocks)
+    left = unlock - block_height
+    if left < 0:
+        left = 0
+    return {
+        "stake_id": sid_num,
+        "owner": s[0],
+        "principal": amount,
+        "start_block": start,
+        "lock_blocks": lock_blocks,
+        "unlock_block": unlock,
+        "elapsed_blocks": elapsed,
+        "remaining_blocks": left,
+        "reward_per_block": amount * float(state["rate"]),
+        "earned_reward": amount * float(state["rate"]) * elapsed,
+        "matured": block_height >= unlock,
+    }
+
+def stake_ids(addr):
+    return state.get("stakes_" + addr, [])
+
+def pool_info():
+    return {
+        "rate": float(state["rate"]),
+        "min_lock": int(state["min_lock"]),
+        "max_lock": int(state["max_lock"]),
+        "balance": this_balance(),
+        "total_principal": float(state["total_principal"]),
+        "reserved_reward": float(state["reserved"]),
+        "available_reward": _available(),
+        "active_stakes": int(state["active"]),
+    }
+
+# --------------------------------------------------------------------------- #
+# 内部辅助函数
+# --------------------------------------------------------------------------- #
+def _must_get(addr, stake_id):
+    s = state.get("s_" + str(int(stake_id)))
+    require(s is not None, "质押不存在")
+    require(s[0] == addr, "该质押不属于此账户")
+    return s
+
+def _elapsed(start, lock_blocks):
+    elapsed = block_height - int(start)
+    if elapsed > lock_blocks:
+        elapsed = lock_blocks
+    if elapsed < 0:
+        elapsed = 0
+    return elapsed
+
+def _earned(addr, stake_id):
+    s = _must_get(addr, stake_id)
+    amount = float(s[1])
+    return amount * float(state["rate"]) * _elapsed(int(s[2]), int(s[3]))
+
+def _available():
+    # 合约余额扣除全部在押本金与已预留奖励后，才可用于新质押的奖励。
+    free = (this_balance() - float(state["total_principal"])
+            - float(state["reserved"]))
+    return free if free > 0 else 0.0
+''',
+    },
+    {
         "name": "counter",
         "title": "计数器",
         "category": "基础",
