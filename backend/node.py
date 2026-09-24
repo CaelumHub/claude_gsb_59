@@ -18,7 +18,8 @@ from .p2p import PeerRegistry, dial_peer, http_get_json, http_post_json
 from .state import ZERO_ADDRESS
 from .storage import DataPaths, atomic_write_json, read_json
 from .transaction import (Transaction, create_call, create_coinbase,
-                          create_deploy, create_transfer)
+                          create_deploy, create_stake, create_transfer,
+                          create_unstake)
 from .txpool import TxPool
 from .wallet_store import WalletStore
 
@@ -206,6 +207,22 @@ class Node:
         nonce = self.blockchain.state.nonce(sender)
         tx = create_call(sender, contract, function, args, fee, nonce,
                          value=value)
+        ok, reason = self.sign_tx_with_wallet(tx)
+        if not ok:
+            return None, reason
+        return tx, None
+
+    def create_stake(self, sender, amount, lock_blocks, fee=0.0):
+        nonce = self.blockchain.state.nonce(sender)
+        tx = create_stake(sender, amount, lock_blocks, fee, nonce)
+        ok, reason = self.sign_tx_with_wallet(tx)
+        if not ok:
+            return None, reason
+        return tx, None
+
+    def create_unstake(self, sender, stake_id, fee=0.0):
+        nonce = self.blockchain.state.nonce(sender)
+        tx = create_unstake(sender, stake_id, fee, nonce)
         ok, reason = self.sign_tx_with_wallet(tx)
         if not ok:
             return None, reason

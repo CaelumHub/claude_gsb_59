@@ -16,12 +16,13 @@ import os
 import time
 
 from . import crypto, pow as pow_mod
+from . import staking
 from .block import Block, make_genesis_block
 from .config import COINBASE_REWARD, GENESIS_PREV_HASH
 from .contract import ContractEngine
 from .state import WorldState, ZERO_ADDRESS
 from .storage import (DataPaths, VersionLedger, atomic_write_json, read_json)
-from .transaction import Transaction, TX_COINBASE
+from .transaction import (Transaction, TX_COINBASE, TX_STAKE, TX_UNSTAKE)
 
 
 class ChainValidationError(Exception):
@@ -74,6 +75,10 @@ class Blockchain:
 
     def cumulative_work_of(self, blocks):
         return sum(int(2 ** b.difficulty) for b in blocks)
+
+    def staking_reward_rate(self):
+        """Per-block staking reward rate (fraction of principal)."""
+        return staking.reward_rate(self.cfg)
 
     # ==================================================================== #
     # Bootstrap / persistence
@@ -196,6 +201,21 @@ class Blockchain:
                 receipt["events"] = result["events"]
                 receipt["return"] = result["return"]
                 receipt["contract"] = tx.to
+            elif tx.tx_type == TX_STAKE:
+                if state.balance(tx.sender) < tx.amount + tx.fee:
+                    raise ChainValidationError("insufficient balance to stake")
+                # The stake id is the staking transaction's txid.
+                stake = staking.create_stake(state, tx.sender, tx.amount,
+                                             tx.data.get("lock_blocks"),
+                                             height, tx.txid)
+                receipt["return"] = staking.stake_view(
+                    stake, height, self.staking_reward_rate())
+            elif tx.tx_type == TX_UNSTAKE:
+                if state.balance(tx.sender) < tx.fee:
+                    raise ChainValidationError("insufficient balance for fee")
+                receipt["return"] = staking.withdraw(
+                    state, tx.sender, tx.data.get("stake_id"), height,
+                    self.staking_reward_rate())
             else:
                 raise ChainValidationError(f"unknown type {tx.tx_type}")
         except Exception as e:  # noqa: BLE001 - revert semantics

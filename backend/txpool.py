@@ -87,6 +87,24 @@ class TxPool:
         elif tx.tx_type == "call":
             if world_state.balance(tx.sender) < tx.amount + tx.fee:
                 return False, "insufficient balance for call"
+        elif tx.tx_type == "stake":
+            from . import staking
+            ok, reason = staking.validate_stake_params(
+                tx.amount, tx.data.get("lock_blocks"))
+            if not ok:
+                return False, reason
+            if world_state.balance(tx.sender) < tx.amount + tx.fee:
+                return False, "insufficient balance to stake"
+        elif tx.tx_type == "unstake":
+            if world_state.balance(tx.sender) < tx.fee:
+                return False, "insufficient balance for fee"
+            stake = world_state.stakes.get(tx.data.get("stake_id"))
+            if stake is None:
+                return False, "stake not found"
+            if stake["owner"] != tx.sender:
+                return False, "only the stake owner can withdraw"
+            if stake["status"] != "active":
+                return False, "stake already withdrawn"
         else:
             return False, f"unknown transaction type '{tx.tx_type}'"
         return True, "ok"

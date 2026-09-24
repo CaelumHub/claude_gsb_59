@@ -22,6 +22,13 @@ MINING_INTERVAL = 3.0                 # demo-friendly auto-mining cadence (s)
 DEFAULT_HASHRATE_JITTER = 4000        # fake hashes/sec shown for the dashboard
 
 # ---------------------------------------------------------------------------
+# Lock-staking rewards
+# ---------------------------------------------------------------------------
+STAKING_REWARD_RATE_PER_BLOCK = 0.01  # fraction of principal accrued per block
+STAKING_MIN_LOCK_BLOCKS = 1           # shortest allowed lock period
+STAKING_MAX_LOCK_BLOCKS = 100000      # longest allowed lock period
+
+# ---------------------------------------------------------------------------
 # P2P networking
 # ---------------------------------------------------------------------------
 DEFAULT_PORT = 8000
@@ -95,6 +102,7 @@ def build_config(args):
         "DIFFICULTY_ADJUST_MAX_FACTOR": DIFFICULTY_ADJUST_MAX_FACTOR,
         "DIFFICULTY_ADJUST_MIN_FACTOR": DIFFICULTY_ADJUST_MIN_FACTOR,
         "COINBASE_REWARD": COINBASE_REWARD,
+        "STAKING_REWARD_RATE_PER_BLOCK": STAKING_REWARD_RATE_PER_BLOCK,
         "MAX_TX_PER_BLOCK": MAX_TX_PER_BLOCK,
         "MAX_BLOCK_FUTURE_DRIFT": MAX_BLOCK_FUTURE_DRIFT,
         "MINING_INTERVAL": MINING_INTERVAL,

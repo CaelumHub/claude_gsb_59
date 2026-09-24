@@ -12,6 +12,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 from . import crypto
+from . import staking
 from .state import ZERO_ADDRESS
 from .storage import read_json, atomic_write_json
 from .transaction import Transaction
@@ -20,7 +21,7 @@ from .templates import template_catalog, get_template, TEMPLATES
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
 PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+         "nodes", "network", "stats", "admin", "templates", "staking"]
 
 
 def _json(payload, status=200):
@@ -501,6 +502,78 @@ def create_app(node):
         atomic_write_json(os.path.join(node.paths.root,
                                        "custom_templates.json"), custom)
         return _json({"ok": True, "name": name})
+
+    # ================================================================== #
+    # Lock-staking
+    # ================================================================== #
+    @app.get("/api/staking/summary")
+    def staking_summary():
+        bc = node.blockchain
+        return _json(staking.summary(bc.state, bc.height,
+                                     bc.staking_reward_rate()))
+
+    @app.get("/api/staking/<addr>")
+    def staking_list(addr):
+        """All stakes of an account with live accrued rewards / lock time."""
+        if not crypto.is_valid_address(addr):
+            return _json({"ok": False, "error": "invalid address"}, 400)
+        bc = node.blockchain
+        rate = bc.staking_reward_rate()
+        return _json({
+            "address": addr,
+            "height": bc.height,
+            "reward_rate_per_block": rate,
+            "stakes": staking.stakes_of(bc.state, addr, bc.height, rate),
+        })
+
+    @app.post("/api/staking/stake")
+    def staking_stake():
+        data = request.get_json(force=True, silent=True) or {}
+        sender = data.get("from")
+        if not crypto.is_valid_address(sender):
+            return _json({"ok": False, "error": "invalid sender"}, 400)
+        try:
+            amount = float(data.get("amount", 0))
+            lock_blocks = int(data.get("lock_blocks", 0))
+            fee = float(data.get("fee", 0))
+        except (TypeError, ValueError):
+            return _json({"ok": False, "error": "invalid amount/lock/fee"}, 400)
+        ok, reason = staking.validate_stake_params(amount, lock_blocks)
+        if not ok:
+            return _json({"ok": False, "error": reason}, 400)
+        tx, err = node.create_stake(sender, amount, lock_blocks, fee)
+        if err:
+            return _json({"ok": False, "error": err}, 400)
+        ok, reason = node.submit_transaction(tx)
+        if ok and data.get("mine"):
+            node.mine_block(sender)
+        return _json({"ok": ok, "reason": reason, "txid": tx.txid,
+                      "stake_id": tx.txid, "amount": amount,
+                      "lock_blocks": lock_blocks, "fee": fee},
+                     status=200 if ok else 400)
+
+    @app.post("/api/staking/unstake")
+    def staking_unstake():
+        data = request.get_json(force=True, silent=True) or {}
+        sender = data.get("from")
+        stake_id = data.get("stake_id", "")
+        if not crypto.is_valid_address(sender):
+            return _json({"ok": False, "error": "invalid sender"}, 400)
+        if not stake_id:
+            return _json({"ok": False, "error": "missing stake_id"}, 400)
+        try:
+            fee = float(data.get("fee", 0))
+        except (TypeError, ValueError):
+            return _json({"ok": False, "error": "invalid fee"}, 400)
+        tx, err = node.create_unstake(sender, stake_id, fee)
+        if err:
+            return _json({"ok": False, "error": err}, 400)
+        ok, reason = node.submit_transaction(tx)
+        if ok and data.get("mine"):
+            node.mine_block(sender)
+        return _json({"ok": ok, "reason": reason, "txid": tx.txid,
+                      "stake_id": stake_id, "fee": fee},
+                     status=200 if ok else 400)
 
     # ================================================================== #
     # Stats

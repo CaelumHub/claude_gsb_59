@@ -74,7 +74,7 @@ const fmt = {
   },
   hex: (s) => "0x" + s,
   shortType: (t) => ({ transfer: "转账", deploy: "部署", call: "调用",
-    coinbase: "出块" }[t] || t),
+    coinbase: "出块", stake: "质押", unstake: "取回" }[t] || t),
 };
 
 /* ---------- toast notifications ---------- */

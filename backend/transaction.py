@@ -1,11 +1,14 @@
 """Transaction model: construction, serialization, hashing, and validation.
 
 The chain uses an account model (similar to Ethereum): every account has a
-balance and a nonce.  Four transaction kinds are supported:
+balance and a nonce.  Six transaction kinds are supported:
 
 * ``transfer`` — move coins between accounts;
 * ``deploy``   — publish a new smart contract (``to`` is ``None``);
 * ``call``     — invoke a contract function (read-only or state-changing);
+* ``stake``    — lock coins for a number of blocks to earn rewards;
+* ``unstake``  — withdraw a stake (principal + reward, or principal only
+  when withdrawn before its unlock height);
 * ``coinbase`` — the miner reward minted at the top of each block.
 
 A transaction's identity (``txid``) is the double-SHA-256 of its canonical
@@ -24,7 +27,10 @@ TX_TRANSFER = "transfer"
 TX_DEPLOY = "deploy"
 TX_CALL = "call"
 TX_COINBASE = "coinbase"
-VALID_TYPES = (TX_TRANSFER, TX_DEPLOY, TX_CALL, TX_COINBASE)
+TX_STAKE = "stake"
+TX_UNSTAKE = "unstake"
+VALID_TYPES = (TX_TRANSFER, TX_DEPLOY, TX_CALL, TX_COINBASE,
+               TX_STAKE, TX_UNSTAKE)
 
 
 class Transaction:
@@ -170,4 +176,31 @@ def create_coinbase(miner, amount, height):
     tx = Transaction("0x0000000000000000000000000000000000000000", miner,
                      amount, 0, 0, TX_COINBASE,
                      data={"height": height, "reward": amount})
+    return tx
+
+
+def create_stake(sender, amount, lock_blocks, fee, nonce, priv=None):
+    """Build (and optionally sign) a lock-staking transaction.
+
+    Locks ``amount`` coins for ``lock_blocks`` blocks; the resulting stake id
+    is the transaction's txid.  The principal is sent to the staking pool.
+    """
+    from .staking import STAKING_POOL_ADDRESS
+    tx = Transaction(sender, STAKING_POOL_ADDRESS, amount, fee, nonce, TX_STAKE,
+                     data={"lock_blocks": int(lock_blocks)})
+    if priv:
+        tx.sign_with(priv)
+    return tx
+
+
+def create_unstake(sender, stake_id, fee, nonce, priv=None):
+    """Build (and optionally sign) a stake-withdrawal transaction.
+
+    Withdraws stake ``stake_id``: principal + accrued reward once matured,
+    principal only (rewards forfeited) when withdrawn early.
+    """
+    tx = Transaction(sender, sender, 0, fee, nonce, TX_UNSTAKE,
+                     data={"stake_id": stake_id})
+    if priv:
+        tx.sign_with(priv)
     return tx

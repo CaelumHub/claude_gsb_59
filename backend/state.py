@@ -17,9 +17,11 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
 class WorldState:
-    def __init__(self, accounts=None, contracts=None):
+    def __init__(self, accounts=None, contracts=None, stakes=None):
         self.accounts = accounts if accounts is not None else {}
         self.contracts = contracts if contracts is not None else {}
+        # Lock-staking records: stake_id -> stake dict (see staking.py).
+        self.stakes = stakes if stakes is not None else {}
 
     # ------------------------------------------------------------------ #
     # Account access
@@ -98,7 +100,12 @@ class WorldState:
             }
             for addr, c in sorted(self.contracts.items())
         }
-        return {"accounts": self.accounts, "contracts": contracts}
+        payload = {"accounts": self.accounts, "contracts": contracts}
+        # Stakes are consensus-critical, but only folded into the root once
+        # any exist so pre-staking chain snapshots keep their original roots.
+        if self.stakes:
+            payload["stakes"] = self.stakes
+        return payload
 
     def root(self):
         return crypto.sha256(canonical_json(self._for_hash())).hex()
@@ -107,6 +114,7 @@ class WorldState:
         return WorldState(
             accounts=copy.deepcopy(self.accounts),
             contracts=copy.deepcopy(self.contracts),
+            stakes=copy.deepcopy(self.stakes),
         )
 
     def to_dict(self):
@@ -120,6 +128,7 @@ class WorldState:
                 }
                 for addr, c in self.contracts.items()
             },
+            "stakes": self.stakes,
         }
 
     @staticmethod
@@ -127,4 +136,5 @@ class WorldState:
         return WorldState(
             accounts=copy.deepcopy(d.get("accounts", {})),
             contracts=copy.deepcopy(d.get("contracts", {})),
+            stakes=copy.deepcopy(d.get("stakes", {})),
         )

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>锁仓质押 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>锁仓质押</h1>
+        <p>锁定代币按区块累积奖励。同一账户可持有多笔独立质押：各自计息、各自到期；
+          到期取回本金+奖励，提前取回仅返还本金（该笔奖励作废，不影响其他质押）。</p>
+      </div>
+
+      <div class="grid cols-4">
+        <div class="card stat accent"><div class="label">每块奖励率</div>
+          <div class="value small" id="statRate">—</div></div>
+        <div class="card stat green"><div class="label">进行中质押</div>
+          <div class="value" id="statActive">—</div></div>
+        <div class="card stat amber"><div class="label">锁定总量</div>
+          <div class="value" id="statLocked">—</div></div>
+        <div class="card stat purple"><div class="label">全网已累积奖励</div>
+          <div class="value" id="statAccrued">—</div></div>
+      </div>
+
+      <div class="grid" style="grid-template-columns: 1fr 1.6fr; margin-top:16px;">
+        <div class="card">
+          <h2>新建质押</h2>
+          <div class="field"><label>质押账户（本地钱包）</label>
+            <select id="stakeWallet"></select></div>
+          <div class="row">
+            <div class="field grow"><label>质押数量</label>
+              <input id="stakeAmount" type="number" min="0" step="any" value="10"></div>
+            <div class="field grow"><label>锁定区块数</label>
+              <input id="stakeBlocks" type="number" min="1" step="1" value="5"></div>
+          </div>
+          <div class="row">
+            <div class="field grow"><label>手续费</label>
+              <input id="stakeFee" type="number" min="0" step="any" value="0"></div>
+            <div class="field"><label>&nbsp;</label>
+              <label class="hint" style="display:flex;gap:6px;align-items:center;">
+                <input type="checkbox" id="stakeMine" checked> 立即出块</label></div>
+          </div>
+          <div class="hint" id="stakePreview" style="margin-bottom:8px;"></div>
+          <button class="btn primary" onclick="submitStake()">🔒 质押</button>
+          <div class="hint" style="margin-top:8px;">
+            每笔质押独立计息：奖励 = 数量 × 奖励率 × 已锁定区块数，到期后停止累积。
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>我的质押 <span class="hint" id="stakeCount"></span></h2>
+          <div class="flex" style="margin-bottom:10px;">
+            <select id="viewWallet" style="max-width:340px;"></select>
+            <button class="btn ghost sm" onclick="loadAll()">🔄 刷新</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>质押 ID</th><th>数量</th><th>起始高度</th><th>解锁高度</th>
+                <th>剩余区块</th><th>已累积奖励</th><th>状态</th><th></th>
+              </tr></thead>
+              <tbody id="stakeRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "staking";
+let wallets = [];
+let stakes = [];
+let summary = null;
+
+function currentWallet() {
+  const i = Number($("#viewWallet").value || 0);
+  return wallets[i] || null;
+}
+
+async function loadWallets() {
+  const d = await API.get("/api/wallet/list");
+  wallets = d.wallets;
+  const opts = wallets.map((w, i) =>
+    `<option value="${i}">${esc(w.label || "钱包")} · ${fmt.addr(w.address, 6)}</option>`);
+  $("#stakeWallet").innerHTML = opts.join("") || `<option value="">（无本地钱包）</option>`;
+  $("#viewWallet").innerHTML = opts.join("") || `<option value="">（无本地钱包）</option>`;
+}
+
+async function loadSummary() {
+  summary = await API.get("/api/staking/summary");
+  $("#statRate").textContent = (summary.reward_rate_per_block * 100) + "% / 块";
+  $("#statActive").textContent = summary.active_stakes;
+  $("#statLocked").textContent = fmt.amount(summary.total_locked);
+  $("#statAccrued").textContent = fmt.amount(summary.total_accrued);
+  updatePreview();
+}
+
+async function loadStakes() {
+  const w = currentWallet();
+  const tbody = $("#stakeRows");
+  if (!w) {
+    tbody.innerHTML = `<tr><td colspan="8" class="zero">请先在钱包页生成本地钱包</td></tr>`;
+    $("#stakeCount").textContent = "";
+    return;
+  }
+  const d = await API.get("/api/staking/" + w.address);
+  stakes = d.stakes;
+  $("#stakeCount").textContent = `（${stakes.length} 笔 · 当前高度 #${d.height}）`;
+  if (!stakes.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="zero">该账户暂无质押记录</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = stakes.map((s, i) => {
+    let status, action;
+    if (s.status === "withdrawn") {
+      status = s.early
+        ? `<span class="badge gray">已提前取回</span>`
+        : `<span class="badge blue">已到期取回</span>`;
+      action = `<span class="hint">实得奖励 ${fmt.amount(s.reward_paid)}</span>`;
+    } else if (s.matured) {
+      status = `<span class="badge green">已到期</span>`;
+      action = `<button class="btn green sm" onclick="withdraw(${i})">取回本息</button>`;
+    } else {
+      status = `<span class="badge amber">锁定中</span>`;
+      action = `<button class="btn ghost sm" onclick="withdraw(${i})"
+        title="提前取回仅返还本金，该笔已累积奖励作废">提前取回</button>`;
+    }
+    return `<tr>
+      <td class="hash" title="${esc(s.id)}">${fmt.hash(s.id, 6)}</td>
+      <td class="mono-num">${fmt.amount(s.amount)}</td>
+      <td>#${s.start_height}</td>
+      <td>#${s.unlock_height}</td>
+      <td class="mono-num">${s.blocks_remaining}</td>
+      <td class="mono-num">${fmt.amount(s.accrued_reward)}</td>
+      <td>${status}</td>
+      <td>${action}</td>
+    </tr>`;
+  }).join("");
+}
+
+function updatePreview() {
+  if (!summary) return;
+  const amount = Number($("#stakeAmount").value || 0);
+  const blocks = Number($("#stakeBlocks").value || 0);
+  const reward = amount * summary.reward_rate_per_block * blocks;
+  $("#stakePreview").textContent =
+    `预计到期奖励：${fmt.amount(reward)}（${amount} × ` +
+    `${summary.reward_rate_per_block * 100}% × ${blocks} 块）`;
+}
+
+async function submitStake() {
+  const i = Number($("#stakeWallet").value || 0);
+  const w = wallets[i];
+  if (!w) return toast("请先选择本地钱包", "error");
+  try {
+    const d = await API.post("/api/staking/stake", {
+      from: w.address,
+      amount: Number($("#stakeAmount").value || 0),
+      lock_blocks: Number($("#stakeBlocks").value || 0),
+      fee: Number($("#stakeFee").value || 0),
+      mine: $("#stakeMine").checked,
+    });
+    toast("质押已提交：" + fmt.hash(d.stake_id, 6), "success");
+    setTimeout(loadAll, 600);
+  } catch (e) {
+    toast("质押失败：" + (e.message || e), "error");
+  }
+}
+
+async function withdraw(i) {
+  const s = stakes[i];
+  const w = currentWallet();
+  if (!s || !w) return;
+  if (!s.matured &&
+      !confirm(`该质押还未到期（还剩 ${s.blocks_remaining} 块）。\n` +
+               `提前取回只能拿回本金 ${fmt.amount(s.amount)}，` +
+               `已累积奖励 ${fmt.amount(s.accrued_reward)} 将全部作废。\n确定继续？`)) {
+    return;
+  }
+  try {
+    await API.post("/api/staking/unstake", {
+      from: w.address, stake_id: s.id, fee: 0, mine: true,
+    });
+    toast(s.matured ? "已取回本金+奖励" : "已提前取回本金（奖励作废）", "success");
+    setTimeout(loadAll, 600);
+  } catch (e) {
+    toast("取回失败：" + (e.message || e), "error");
+  }
+}
+
+async function loadAll() {
+  try {
+    await loadSummary();
+    await loadStakes();
+  } catch (e) { /* node unreachable */ }
+}
+
+$("#stakeAmount").addEventListener("input", updatePreview);
+$("#stakeBlocks").addEventListener("input", updatePreview);
+$("#viewWallet").addEventListener("change", loadStakes);
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadWallets();
+  await loadAll();
+  setInterval(loadAll, 3000);
+});
+</script>
+</body>
+</html>
